@@ -27,12 +27,12 @@ void processFile(const string& inputPath, const string& outputPath, const string
 
     // 2. Open Files in Binary Mode
     ifstream inFile(inputPath, ios::binary);
-    ofstream outFile(outputPath, ios::binary);
-
-    if (!inFile || !outFile) {
+    
+    if (!inFile ) {
         cerr << "Error: Could not open files." << endl;
         return;
     }
+    ofstream outFile(outputPath, ios::binary);
 
     char byteBuffer;
     int passIndex = 0; // To track which digit of the passcode we are using
@@ -96,6 +96,14 @@ int main(int argc, char* argv[]) {
     string mode = argv[1];
     string filename = argv[2];
     string passcode = argv[3];
+
+    ifstream checkFile(filename);
+    if (!checkFile) { 
+        cerr << "Error: Input file '" << filename << "' does not exist." << endl;
+        return 1;
+    }
+    checkFile.close(); // Close it immediately so processFile can use it
+    // -------------------------------------------------------
 
     if (mode == "e") {
         string outName = filename + ".enc";
