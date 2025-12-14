@@ -1,3 +1,4 @@
+@ -1,115 +0,0 @@
 # encryptor-cpp
 
 A small C++ collection of file “encryptor/protector” prototypes:
@@ -112,4 +113,4 @@ The repository has multiple release artifacts (as shown on GitHub Releases):
 
 ## License
 
-If you intend to open-source this, add a license file (e.g., MIT) and update this section.
+It is free of course :)
