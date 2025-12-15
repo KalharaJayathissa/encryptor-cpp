@@ -53,7 +53,7 @@ sudo apt install -y build-essential pkg-config qtbase5-dev libssl-dev
 ### Build the AES-capable GUI
 
 ```bash
-g++ -fPIC encryptor-advanced.cpp -o file-protector-final \
+g++ -O3 -fPIC encryptor-advanced.cpp -o file-protector-final \
   $(pkg-config --cflags --libs Qt5Widgets) -lssl -lcrypto
 ```
 
@@ -66,7 +66,14 @@ Run:
 ### Build the fast/legacy GUI
 
 ```bash
-g++ -fPIC encryptor-gui.cpp -o basic-encryptor-gui \
+g++ -O3 -fPIC encryptor-gui.cpp -o basic-encryptor-gui \
+  $(pkg-config --cflags --libs Qt5Widgets)
+```
+
+Alternative output name (as used in some builds):
+
+```bash
+g++ -O3 -fPIC encryptor-gui.cpp -o threaded_encryptor_gui \
   $(pkg-config --cflags --libs Qt5Widgets)
 ```
 
@@ -76,20 +83,75 @@ Run:
 ./basic-encryptor-gui
 ```
 
-### Build the fast/legacy CLI (v3)
+### Build the fast/legacy CLI (v1 / v2 / v3)
 
 ```bash
-g++ -O2 encryptor-v3.cpp -o basic-encryptor
+g++ -O3 encryptor-v1.cpp -o encryptor-v1
+g++ -O3 encryptor-v2.cpp -o encryptor-v2
+g++ -O3 encryptor-v3.cpp -o encryptor-v3
 ```
 
 Run:
 
 ```bash
 # Encrypt
-./basic-encryptor e /path/to/file 1234
+./encryptor-v3 e /path/to/file 1234
 
 # Decrypt
-./basic-encryptor d /path/to/file.enc 1234
+./encryptor-v3 d /path/to/file.enc 1234
+```
+
+## Build (Windows)
+
+### Option A: Cross-compile from Linux (MinGW-w64)
+
+Install the cross toolchain (Debian/Ubuntu example):
+
+```bash
+sudo apt update
+sudo apt install -y mingw-w64
+```
+
+C (example template you mentioned, optimized):
+
+```bash
+x86_64-w64-mingw32-gcc -O3 your_code.c -o program_name.exe -static
+```
+
+C++ (CLI versions in this repo, optimized):
+
+```bash
+x86_64-w64-mingw32-g++ -O3 encryptor-v1.cpp -o encryptor-v1.exe -static
+x86_64-w64-mingw32-g++ -O3 encryptor-v2.cpp -o encryptor-v2.exe -static
+x86_64-w64-mingw32-g++ -O3 encryptor-v3.cpp -o encryptor-v3.exe -static
+```
+
+Notes:
+
+- `-static` produces a larger `.exe` but reduces DLL dependencies.
+- Cross-compiling the Qt GUIs from Linux usually requires a Windows Qt build/toolchain (e.g., MXE). If you have a Windows-target Qt `pkg-config` setup, the pattern is similar:
+
+```bash
+# Example pattern only (requires Windows Qt libs available to pkg-config)
+x86_64-w64-mingw32-g++ -O3 -fPIC encryptor-gui.cpp -o threaded_encryptor_gui.exe \
+  $(pkg-config --cflags --libs Qt5Widgets) -static
+```
+
+### Option B: Compile on Windows (MSYS2 / MinGW-w64)
+
+In an MSYS2 MinGW64 shell (after installing Qt and pkg-config), you can build with:
+
+```bash
+g++ -O3 encryptor-v3.cpp -o encryptor-v3.exe
+g++ -O3 encryptor-v2.cpp -o encryptor-v2.exe
+g++ -O3 encryptor-v1.cpp -o encryptor-v1.exe
+```
+
+For the Qt GUI (if Qt5 is installed and `pkg-config` is available):
+
+```bash
+g++ -O3 encryptor-gui.cpp -o threaded_encryptor_gui.exe \
+  $(pkg-config --cflags --libs Qt5Widgets)
 ```
 
 ## AES details (current implementation)
