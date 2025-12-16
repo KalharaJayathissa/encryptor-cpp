@@ -35,27 +35,30 @@ const int SALT_LEN = 16;
 // --- UTILS ---
 int charToInt(char c) { return c - '0'; }
 
-// Derive 32-byte Key and 16-byte IV from string Password + Salt
-bool deriveKey(const std::string& pass, unsigned char* salt, unsigned char* key, unsigned char* iv) {
+// --- FIXED LOGIC: Key Derivation ---
+// CHANGED: Removed the 'iv' parameter. We only derive the Key here.
+bool deriveKey(const std::string& pass, unsigned char* salt, unsigned char* key) {
     // PBKDF2 with SHA-256, 10000 iterations
+    // This stretches the text password into a 32-byte binary key
     if (!PKCS5_PBKDF2_HMAC(pass.c_str(), pass.length(), salt, SALT_LEN, 10000, EVP_sha256(), AES_KEY_LEN, key))
         return false;
     
-    // We need an IV. For this simple example, we'll derive it from the Key (simple hash)
-    // In production, you might generate a separate random IV and store it with the salt.
-    // Here we just hash the key to get a deterministic IV for this session.
-    SHA256(key, AES_KEY_LEN, iv); // This gives 32 bytes, we only need first 16 for IV
     return true;
 }
 
-// --- LOGIC: AES-256 ---
+// --- FIXED LOGIC: AES-256 (Production Grade) ---
 void processFileAES(std::string inputPath, std::string outputPath, std::string passcode, bool encrypt, 
                     QProgressBar* bar, QPushButton* btn, QWidget* parent) {
     
     FILE* inFile = fopen(inputPath.c_str(), "rb");
     FILE* outFile = fopen(outputPath.c_str(), "wb");
 
-    if (!inFile || !outFile) return;
+    if (!inFile || !outFile) {
+        // Cleanup if one failed but the other opened
+        if (inFile) fclose(inFile);
+        if (outFile) fclose(outFile);
+        return;
+    }
 
     // Get Total Size
     fseek(inFile, 0, SEEK_END);
@@ -63,7 +66,7 @@ void processFileAES(std::string inputPath, std::string outputPath, std::string p
     fseek(inFile, 0, SEEK_SET);
 
     unsigned char key[AES_KEY_LEN];
-    unsigned char iv[SHA256_DIGEST_LENGTH]; // Buffer large enough for SHA256 output
+    unsigned char iv[AES_IV_LEN];   // We will now handle this explicitly
     unsigned char salt[SALT_LEN];
 
     // --- SETUP ENCRYPTION CONTEXT ---
@@ -73,29 +76,41 @@ void processFileAES(std::string inputPath, std::string outputPath, std::string p
     if (encrypt) {
         // 1. Generate Random Salt
         RAND_bytes(salt, SALT_LEN);
-        // 2. Write Salt to beginning of output file
+        
+        // 2. Generate Random IV (SECURITY FIX)
+        // This ensures the IV is totally independent from the Key
+        RAND_bytes(iv, AES_IV_LEN);
+
+        // 3. Write Salt AND IV to the file header
+        // File starts with: [SALT (16 bytes)] [IV (16 bytes)] [DATA...]
         fwrite(salt, 1, SALT_LEN, outFile);
+        fwrite(iv, 1, AES_IV_LEN, outFile);
+
     } else {
-        // 1. Read Salt from beginning of input file
+        // 1. Read Salt
         if (fread(salt, 1, SALT_LEN, inFile) != SALT_LEN) {
-            fclose(inFile); 
-            fclose(outFile); 
-            EVP_CIPHER_CTX_free(ctx);
-             return;
+            fclose(inFile); fclose(outFile); EVP_CIPHER_CTX_free(ctx); return;
         }
-        totalSize -= SALT_LEN; // Adjust progress bar math
+        
+        // 2. Read IV (SECURITY FIX)
+        if (fread(iv, 1, AES_IV_LEN, inFile) != AES_IV_LEN) {
+            fclose(inFile); fclose(outFile); EVP_CIPHER_CTX_free(ctx); return;
+        }
+        
+        // Adjust progress bar math: Total size - Header size
+        totalSize -= (SALT_LEN + AES_IV_LEN); 
     }
 
-    // 3. Generate Key/IV
-    deriveKey(passcode, salt, key, iv);
+    // 3. Generate Key (Notice we pass only salt and key)
+    deriveKey(passcode, salt, key);
 
-    // 4. Init OpenSSL
+    // 4. Init OpenSSL with the Key and the explicit Random IV
     if (encrypt) EVP_EncryptInit_ex(ctx, cipher, NULL, key, iv);
     else         EVP_DecryptInit_ex(ctx, cipher, NULL, key, iv);
 
-    // --- PROCESS LOOP ---
+    // --- PROCESS LOOP (Unchanged) ---
     unsigned char inBuf[BUFFER_SIZE];
-    unsigned char outBuf[BUFFER_SIZE + AES_BLOCK_SIZE]; // Output can be slightly larger due to padding
+    unsigned char outBuf[BUFFER_SIZE + AES_BLOCK_SIZE]; 
     int outLen;
     long long processedBytes = 0;
     int lastPercent = -1;
@@ -138,12 +153,15 @@ void processFileAES(std::string inputPath, std::string outputPath, std::string p
     }, Qt::QueuedConnection);
 }
 
-// --- LOGIC: OLD FAST METHOD ---
+// --- LOGIC: OPTIMIZED FAST METHOD ---
 void processFileFast(std::string inputPath, std::string outputPath, std::string passcode, bool encrypt, 
                      QProgressBar* bar, QPushButton* btn, QWidget* parent) {
+    
+    // 1. Prepare Password Digits (Same logic, just pre-calculated)
     std::vector<int> passDigits;
     for (char c : passcode) {
-        if (isdigit(static_cast<unsigned char>(c))) passDigits.push_back(charToInt(c));
+        if (isdigit(static_cast<unsigned char>(c))) 
+            passDigits.push_back(charToInt(c));
     }
 
     if (passDigits.empty()) {
@@ -153,68 +171,84 @@ void processFileFast(std::string inputPath, std::string outputPath, std::string 
         return;
     }
 
-    std::ifstream inFile(inputPath, std::ios::binary);
-    if (!inFile.is_open()) {
+    // 2. Open Files using C-Style I/O (Faster than std::fstream)
+    FILE* inFile = fopen(inputPath.c_str(), "rb");
+    FILE* outFile = fopen(outputPath.c_str(), "wb");
+
+    if (!inFile || !outFile) {
+        if (inFile) fclose(inFile);
+        if (outFile) fclose(outFile);
         QMetaObject::invokeMethod(parent, [=](){
-            QMessageBox::warning(parent, "Error", "Could not open input file.");
+            QMessageBox::warning(parent, "Error", "Could not open files.");
         }, Qt::QueuedConnection);
         return;
     }
 
-    inFile.seekg(0, std::ios::end);
-    long long totalSize = inFile.tellg();
-    inFile.seekg(0, std::ios::beg);
+    // 3. Get Total Size for Progress Bar
+    fseek(inFile, 0, SEEK_END);
+    long long totalSize = ftell(inFile);
+    fseek(inFile, 0, SEEK_SET);
 
-    std::ofstream outFile(outputPath, std::ios::binary);
-    if (!outFile.is_open()) {
-        inFile.close();
-        QMetaObject::invokeMethod(parent, [=](){
-            QMessageBox::warning(parent, "Error", "Could not open output file.");
-        }, Qt::QueuedConnection);
-        return;
-    }
-
-    std::vector<char> buffer(BUFFER_SIZE);
+    // 4. Create a Raw Buffer on the Stack (Very fast access)
+    unsigned char buffer[BUFFER_SIZE];
+    
+    // Optimization: Cache vector size to avoid calling .size() repeatedly
     const int pssize = static_cast<int>(passDigits.size());
     int passIndex = 0;
     long long processedBytes = 0;
     int lastPercent = -1;
 
-    while (inFile) {
-        inFile.read(buffer.data(), BUFFER_SIZE);
-        long bytesRead = inFile.gcount();
-        if (bytesRead == 0) break;
+    // 5. The Loop
+    while (true) {
+        // Read a big chunk (64KB) at once
+        size_t bytesRead = fread(buffer, 1, BUFFER_SIZE, inFile);
+        if (bytesRead <= 0) break;
 
-        for (long i = 0; i < bytesRead; ++i) {
-            unsigned char byte = static_cast<unsigned char>(buffer[i]);
+        // Process the buffer in-memory
+        for (size_t i = 0; i < bytesRead; ++i) {
+            // We use a temporary variable 'byte' to minimize memory writes
+            unsigned char byte = buffer[i];
 
+            // --- High Nibble Processing ---
             int high = (byte >> 4) & 0x0F;
             int d1 = passDigits[passIndex];
-            passIndex = (passIndex + 1) % pssize;
+            
+            // Optimization: avoiding modulo (%) for index increment makes it slightly faster
+            passIndex++;
+            if (passIndex >= pssize) passIndex = 0;
+
             high = encrypt ? (high + d1) % 16 : (high - d1 + 16) % 16;
 
+            // --- Low Nibble Processing ---
             int low = byte & 0x0F;
             int d2 = passDigits[passIndex];
-            passIndex = (passIndex + 1) % pssize;
+            
+            passIndex++;
+            if (passIndex >= pssize) passIndex = 0;
+
             low = encrypt ? (low + d2) % 16 : (low - d2 + 16) % 16;
 
-            buffer[i] = static_cast<char>((high << 4) | low);
+            // Recombine and write back to buffer
+            buffer[i] = static_cast<unsigned char>((high << 4) | low);
         }
 
-        outFile.write(buffer.data(), bytesRead);
-        processedBytes += bytesRead;
+        // Write the processed chunk to disk
+        fwrite(buffer, 1, bytesRead, outFile);
 
+        // UI Update (Thread Safe)
+        processedBytes += bytesRead;
         if (totalSize > 0) {
             int percent = static_cast<int>((processedBytes * 100) / totalSize);
-            if (percent != lastPercent) {
+            if (percent != lastPercent && percent <= 100) {
                 lastPercent = percent;
                 QMetaObject::invokeMethod(bar, [=](){ bar->setValue(percent); }, Qt::QueuedConnection);
             }
         }
     }
 
-    inFile.close();
-    outFile.close();
+    // Cleanup
+    fclose(inFile);
+    fclose(outFile);
 
     QMetaObject::invokeMethod(parent, [=](){
         btn->setEnabled(true);
@@ -224,18 +258,18 @@ void processFileFast(std::string inputPath, std::string outputPath, std::string 
     }, Qt::QueuedConnection);
 }
 
-// --- UI CLASS ---
+// --- UI CLASS (Unchanged) ---
 class EncryptorWindow : public QWidget {
 public:
     QLineEdit *pathEdit;
     QLineEdit *passEdit;
     QProgressBar *progressBar;
     QRadioButton *radioEncrypt;
-    QCheckBox *checkAES; // NEW: Checkbox for AES
+    QCheckBox *checkAES; 
     QPushButton *btnRun;
     
     EncryptorWindow() {
-        setWindowTitle("file Encryptor");
+        setWindowTitle("Pro Encryptor (Debian)");
         QFont font = this->font(); font.setPointSize(10); this->setFont(font);
 
         QVBoxLayout *mainLayout = new QVBoxLayout(this);
