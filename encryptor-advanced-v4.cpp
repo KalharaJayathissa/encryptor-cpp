@@ -191,186 +191,18 @@ void processFileFast(std::string inputPath, std::string outputPath, std::string 
     fclose(outFile);
 }
 
-// --- BATCH MANAGER ---
+// Forward declarations
+class EncryptorWindow;
 void processBatch(std::string startPath, std::string passcode, bool encrypt, bool useAES, 
                   bool encryptFileNames, bool encryptFolderNames, bool deleteOriginal,
-                  QProgressBar* barFile, QProgressBar* barTotal, QPushButton* btn, QWidget* parent) {
-    
-    std::vector<std::string> filesToProcess;
-    std::vector<std::string> foldersToProcess; // NEW: Track folders
-    long long totalBatchBytes = 0;
-
-    // 1. DISCOVERY
-    try {
-        if (fs::is_directory(startPath)) {
-            // Recursive walk
-            for (const auto& entry : fs::recursive_directory_iterator(startPath)) {
-                if (entry.is_regular_file()) {
-                    filesToProcess.push_back(entry.path().string());
-                    totalBatchBytes += entry.file_size();
-                } else if (entry.is_directory()) {
-                    foldersToProcess.push_back(entry.path().string());
-                }
-            }
-            // Don't forget the root folder itself if we want to rename it (optional, usually safer to skip root)
-            // foldersToProcess.push_back(startPath); 
-        } else if (fs::exists(startPath)) {
-            filesToProcess.push_back(startPath);
-            totalBatchBytes = fs::file_size(startPath);
-        }
-    } catch (...) {
-        QMetaObject::invokeMethod(parent, [=](){
-            QMessageBox::warning(parent, "Error", "Invalid path.");
-            btn->setEnabled(true); btn->setText("Start Operation");
-        }, Qt::QueuedConnection);
-        return;
-    }
-
-    if (filesToProcess.empty() && foldersToProcess.empty()) {
-        QMetaObject::invokeMethod(parent, [=](){
-            QMessageBox::warning(parent, "Error", "No files found.");
-            btn->setEnabled(true); btn->setText("Start Operation");
-        }, Qt::QueuedConnection);
-        return;
-    }
-
-    // 2. PROCESS FILES FIRST (Paths are valid now)
-    long long globalProcessed = 0;
-    
-    for (const auto& inPath : filesToProcess) {
-        std::string outPath;
-        unsigned char salt[SALT_LEN];
-        unsigned char key[AES_KEY_LEN];
-
-        if (encrypt) {
-            RAND_bytes(salt, SALT_LEN); 
-            deriveKey(passcode, salt, key);
-
-            fs::path p(inPath);
-            std::string parentDir = p.parent_path().string();
-            std::string filename = p.filename().string();
-            
-            if (encryptFileNames && useAES) {
-                QString qEncName = encryptName(QString::fromStdString(filename), key);
-                outPath = parentDir + "/" + qEncName.toStdString() + ".aes";
-            } else {
-                outPath = inPath + (useAES ? ".aes" : ".enc");
-            }
-
-        } else {
-            // Decrypt Logic
-            if (useAES) {
-                FILE* peekFile = fopen(inPath.c_str(), "rb");
-                if (peekFile) {
-                    if (fread(salt, 1, SALT_LEN, peekFile) != SALT_LEN) { fclose(peekFile); continue; }
-                    fclose(peekFile);
-                    deriveKey(passcode, salt, key);
-                } else continue;
-            }
-
-            fs::path p(inPath);
-            std::string parentDir = p.parent_path().string();
-            std::string stem = p.stem().string();
-            
-            if (encryptFileNames && useAES) {
-                 QString qDecName = decryptName(QString::fromStdString(stem), key);
-                 outPath = parentDir + "/" + qDecName.toStdString();
-            } else {
-                 std::string suffix = useAES ? ".aes" : ".enc";
-                 if (inPath.size() > suffix.size() && 
-                     inPath.compare(inPath.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                     outPath = inPath.substr(0, inPath.size() - suffix.size());
-                 } else {
-                     continue; 
-                 }
-            }
-        }
-
-        long long localProcessed = 0;
-        auto callback = [&](long long delta, long long fileTotal) {
-            localProcessed += delta;
-            globalProcessed += delta;
-            int percentFile = (fileTotal > 0) ? (localProcessed * 100 / fileTotal) : 0;
-            int percentTotal = (totalBatchBytes > 0) ? (globalProcessed * 100 / totalBatchBytes) : 0;
-            QMetaObject::invokeMethod(parent, [=](){
-                barFile->setValue(percentFile);
-                barTotal->setValue(percentTotal);
-            }, Qt::QueuedConnection);
-        };
-
-        if (useAES) processFileAES(inPath, outPath, key, salt, encrypt, callback);
-        else        processFileFast(inPath, outPath, passcode, encrypt, callback);
-        
-        if (deleteOriginal) { try { fs::remove(inPath); } catch (...) {} }
-    }
-
-    // 3. PROCESS FOLDERS LAST (Bottom-Up Rename)
-    // Only if AES and EncryptFolderNames are active
-    if (encryptFolderNames && useAES && !foldersToProcess.empty()) {
-        
-        // Setup Fixed Salt for Folders (Cannot store salt in folder, so use deterministic hash)
-        unsigned char folderSalt[SALT_LEN];
-        SHA256((unsigned char*)passcode.c_str(), passcode.length(), folderSalt); // Salt is Hash of Pass
-        // Truncate to 16 bytes (SHA256 is 32) - just use first 16
-        
-        unsigned char folderKey[AES_KEY_LEN];
-        deriveKey(passcode, folderSalt, folderKey); // Derive Folder Key
-
-        // SORT: Deepest paths first (Longest string length)
-        // This prevents renaming a parent before its children
-        std::sort(foldersToProcess.begin(), foldersToProcess.end(), [](const std::string& a, const std::string& b) {
-            return a.length() > b.length();
-        });
-
-        for (const auto& dirPath : foldersToProcess) {
-            fs::path p(dirPath);
-            std::string parentDir = p.parent_path().string();
-            std::string dirName = p.filename().string();
-            std::string newPath;
-
-            if (encrypt) {
-                QString qEnc = encryptName(QString::fromStdString(dirName), folderKey);
-                newPath = parentDir + "/" + qEnc.toStdString();
-            } else {
-                // Try decrypt
-                // Simple heuristic: Is it valid Base64?
-                // We just try decrypting. If it wasn't encrypted, result might be garbage, 
-                // but that's the risk of "Folder Encryption" without metadata files.
-                QString qDec = decryptName(QString::fromStdString(dirName), folderKey);
-                // Basic check: If result is empty or garbage, maybe don't rename? 
-                // For this code, we assume if mode is Decrypt, user expects it.
-                if (!qDec.isEmpty()) {
-                     newPath = parentDir + "/" + qDec.toStdString();
-                } else {
-                    continue; 
-                }
-            }
-
-            try {
-                fs::rename(dirPath, newPath);
-            } catch (...) {
-                // Ignore errors (e.g., folder locked by system)
-            }
-        }
-    }
-
-    // 4. FINISHED
-    QMetaObject::invokeMethod(parent, [=](){
-        btn->setEnabled(true);
-        btn->setText("Start Operation");
-        barFile->setValue(100);
-        barTotal->setValue(100);
-        QMessageBox::information(parent, "Success", "Operation Complete!");
-        barFile->setValue(0);
-        barTotal->setValue(0);
-    }, Qt::QueuedConnection);
-}
+                  QProgressBar* barFile, QProgressBar* barTotal, QPushButton* btn, QWidget* parent);
 
 // --- UI CLASS ---
 class EncryptorWindow : public QWidget {
 public:
     QLineEdit *pathEdit;
     QLineEdit *passEdit;
+    QLabel *labelCurrentFile;
     QProgressBar *progressBarFile;  
     QProgressBar *progressBarTotal; 
     QRadioButton *radioEncrypt;
@@ -426,7 +258,7 @@ public:
         modeLayout->addWidget(radioDecrypt);
         gbLayout->addLayout(modeLayout);
 
-        checkAES = new QCheckBox("Use AES-256 (Required for Name Encryption)");
+        checkAES = new QCheckBox("Use AES-256 (More secure/Required for Name Encryption)");
         checkAES->setChecked(true);
         gbLayout->addWidget(checkAES);
         
@@ -456,7 +288,8 @@ public:
         });
 
         // --- PROGRESS ---
-        mainLayout->addWidget(new QLabel("Current File:"));
+        labelCurrentFile = new QLabel("Current File:");
+        mainLayout->addWidget(labelCurrentFile);
         progressBarFile = new QProgressBar();
         progressBarFile->setAlignment(Qt::AlignCenter);
         mainLayout->addWidget(progressBarFile);
@@ -499,6 +332,180 @@ public:
         });
     }
 };
+
+// --- BATCH MANAGER IMPLEMENTATION ---
+void processBatch(std::string startPath, std::string passcode, bool encrypt, bool useAES, 
+                  bool encryptFileNames, bool encryptFolderNames, bool deleteOriginal,
+                  QProgressBar* barFile, QProgressBar* barTotal, QPushButton* btn, QWidget* parent) {
+    
+    std::vector<std::string> filesToProcess;
+    std::vector<std::string> foldersToProcess;
+    long long totalBatchBytes = 0;
+
+    // 1. DISCOVERY
+    try {
+        if (fs::is_directory(startPath)) {
+            for (const auto& entry : fs::recursive_directory_iterator(startPath)) {
+                if (entry.is_regular_file()) {
+                    filesToProcess.push_back(entry.path().string());
+                    totalBatchBytes += entry.file_size();
+                } else if (entry.is_directory()) {
+                    foldersToProcess.push_back(entry.path().string());
+                }
+            }
+        } else if (fs::exists(startPath)) {
+            filesToProcess.push_back(startPath);
+            totalBatchBytes = fs::file_size(startPath);
+        }
+    } catch (...) {
+        QMetaObject::invokeMethod(parent, [=](){
+            QMessageBox::warning(parent, "Error", "Invalid path.");
+            btn->setEnabled(true); btn->setText("Start Operation");
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    if (filesToProcess.empty() && foldersToProcess.empty()) {
+        QMetaObject::invokeMethod(parent, [=](){
+            QMessageBox::warning(parent, "Error", "No files found.");
+            btn->setEnabled(true); btn->setText("Start Operation");
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    // 2. PROCESS FILES FIRST
+    long long globalProcessed = 0;
+    
+    for (const auto& inPath : filesToProcess) {
+        std::string outPath;
+        unsigned char salt[SALT_LEN];
+        unsigned char key[AES_KEY_LEN];
+
+        if (encrypt) {
+            RAND_bytes(salt, SALT_LEN); 
+            deriveKey(passcode, salt, key);
+
+            fs::path p(inPath);
+            std::string parentDir = p.parent_path().string();
+            std::string filename = p.filename().string();
+            
+            if (encryptFileNames && useAES) {
+                QString qEncName = encryptName(QString::fromStdString(filename), key);
+                outPath = parentDir + "/" + qEncName.toStdString() + ".aes";
+            } else {
+                outPath = inPath + (useAES ? ".aes" : ".enc");
+            }
+
+        } else {
+            if (useAES) {
+                FILE* peekFile = fopen(inPath.c_str(), "rb");
+                if (peekFile) {
+                    if (fread(salt, 1, SALT_LEN, peekFile) != SALT_LEN) { fclose(peekFile); continue; }
+                    fclose(peekFile);
+                    deriveKey(passcode, salt, key);
+                } else continue;
+            }
+
+            fs::path p(inPath);
+            std::string parentDir = p.parent_path().string();
+            std::string stem = p.stem().string();
+            
+            if (encryptFileNames && useAES) {
+                 QString qDecName = decryptName(QString::fromStdString(stem), key);
+                 outPath = parentDir + "/" + qDecName.toStdString();
+            } else {
+                 std::string suffix = useAES ? ".aes" : ".enc";
+                 if (inPath.size() > suffix.size() && 
+                     inPath.compare(inPath.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                     outPath = inPath.substr(0, inPath.size() - suffix.size());
+                 } else {
+                     continue; 
+                 }
+            }
+        }
+
+        long long localProcessed = 0;
+        fs::path currentFilePath(inPath);
+        std::string currentFileName = currentFilePath.filename().string();
+        
+        auto callback = [&](long long delta, long long fileTotal) {
+            localProcessed += delta;
+            globalProcessed += delta;
+            int percentFile = (fileTotal > 0) ? (localProcessed * 100 / fileTotal) : 0;
+            int percentTotal = (totalBatchBytes > 0) ? (globalProcessed * 100 / totalBatchBytes) : 0;
+            QMetaObject::invokeMethod(parent, [=](){
+                barFile->setValue(percentFile);
+                barTotal->setValue(percentTotal);
+            }, Qt::QueuedConnection);
+        };
+        
+        QMetaObject::invokeMethod(parent, [=](){
+            EncryptorWindow* win = static_cast<EncryptorWindow*>(parent);
+            if (win) {
+                QString labelText = encrypt ? 
+                    QString("Encrypting: %1").arg(QString::fromStdString(currentFileName)) :
+                    QString("Decrypting: %1").arg(QString::fromStdString(currentFileName));
+                win->labelCurrentFile->setText(labelText);
+            }
+        }, Qt::QueuedConnection);
+
+        if (useAES) processFileAES(inPath, outPath, key, salt, encrypt, callback);
+        else        processFileFast(inPath, outPath, passcode, encrypt, callback);
+        
+        if (deleteOriginal) { try { fs::remove(inPath); } catch (...) {} }
+    }
+
+    // 3. PROCESS FOLDERS LAST
+    if (encryptFolderNames && useAES && !foldersToProcess.empty()) {
+        unsigned char folderSalt[SALT_LEN];
+        SHA256((unsigned char*)passcode.c_str(), passcode.length(), folderSalt);
+        
+        unsigned char folderKey[AES_KEY_LEN];
+        deriveKey(passcode, folderSalt, folderKey);
+
+        std::sort(foldersToProcess.begin(), foldersToProcess.end(), [](const std::string& a, const std::string& b) {
+            return a.length() > b.length();
+        });
+
+        for (const auto& dirPath : foldersToProcess) {
+            fs::path p(dirPath);
+            std::string parentDir = p.parent_path().string();
+            std::string dirName = p.filename().string();
+            std::string newPath;
+
+            if (encrypt) {
+                QString qEnc = encryptName(QString::fromStdString(dirName), folderKey);
+                newPath = parentDir + "/" + qEnc.toStdString();
+            } else {
+                QString qDec = decryptName(QString::fromStdString(dirName), folderKey);
+                if (!qDec.isEmpty()) {
+                     newPath = parentDir + "/" + qDec.toStdString();
+                } else {
+                    continue; 
+                }
+            }
+
+            try {
+                fs::rename(dirPath, newPath);
+            } catch (...) {}
+        }
+    }
+
+    // 4. FINISHED
+    QMetaObject::invokeMethod(parent, [=](){
+        btn->setEnabled(true);
+        btn->setText("Start Operation");
+        barFile->setValue(100);
+        barTotal->setValue(100);
+        EncryptorWindow* win = static_cast<EncryptorWindow*>(parent);
+        if (win) {
+            win->labelCurrentFile->setText("Operation Complete!");
+        }
+        QMessageBox::information(parent, "Success", "Operation Complete!");
+        barFile->setValue(0);
+        barTotal->setValue(0);
+    }, Qt::QueuedConnection);
+}
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
