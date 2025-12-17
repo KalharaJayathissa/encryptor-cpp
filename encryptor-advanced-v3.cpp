@@ -183,7 +183,7 @@ void processFileFast(std::string inputPath, std::string outputPath, std::string 
 }
 
 // --- LOGIC: BATCH MANAGER (Auto-detects File vs Folder) ---
-void processBatch(std::string startPath, std::string passcode, bool encrypt, bool useAES, bool deleteOriginal,
+void processBatch(std::string startPath, std::string passcode, bool encrypt, bool useAES,
                   QProgressBar* barFile, QProgressBar* barTotal, QPushButton* btn, QWidget* parent) {
     
     std::vector<std::string> filesToProcess;
@@ -263,15 +263,6 @@ void processBatch(std::string startPath, std::string passcode, bool encrypt, boo
         // --- Run Algorithm ---
         if (useAES) processFileAES(inPath, outPath, passcode, encrypt, callback);
         else        processFileFast(inPath, outPath, passcode, encrypt, callback);
-        
-        // --- Delete Original File if requested ---
-        if (deleteOriginal) {
-            try {
-                fs::remove(inPath);
-            } catch (...) {
-                // Ignore deletion errors and continue processing
-            }
-        }
     }
 
     // 3. COMPLETION
@@ -296,7 +287,6 @@ public:
     QProgressBar *progressBarTotal; // Bar 2: Total Batch
     QRadioButton *radioEncrypt;
     QCheckBox *checkAES;
-    QCheckBox *checkDeleteOriginal;
     QPushButton *btnRun;
     
     EncryptorWindow() {
@@ -354,10 +344,6 @@ public:
         checkAES = new QCheckBox("Use AES-256 (Recommended)");
         checkAES->setChecked(true);
         gbLayout->addWidget(checkAES);
-        
-        checkDeleteOriginal = new QCheckBox("Delete original file after operation");
-        checkDeleteOriginal->setChecked(false);
-        gbLayout->addWidget(checkDeleteOriginal);
 
         gb->setLayout(gbLayout);
         mainLayout->addWidget(gb);
@@ -385,7 +371,6 @@ public:
             std::string pass = passEdit->text().toStdString();
             bool encrypt = radioEncrypt->isChecked();
             bool useAES = checkAES->isChecked();
-            bool deleteOriginal = checkDeleteOriginal->isChecked();
 
             // Validation
             if (path.empty() || pass.empty()) {
@@ -404,7 +389,7 @@ public:
             progressBarTotal->setValue(0);
 
             // Start Thread (ProcessBatch handles everything)
-            std::thread worker(processBatch, path, pass, encrypt, useAES, deleteOriginal, progressBarFile, progressBarTotal, btnRun, this);
+            std::thread worker(processBatch, path, pass, encrypt, useAES, progressBarFile, progressBarTotal, btnRun, this);
             worker.detach();
         });
     }
