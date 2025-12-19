@@ -377,6 +377,20 @@ void processBatch(std::string startPath, std::string passcode, bool encrypt, boo
     long long globalProcessed = 0;
     
     for (const auto& inPath : filesToProcess) {
+        // When decrypting, only process files with .enc or .aes extensions
+        if (!encrypt) {
+            bool hasValidExtension = false;
+            if (inPath.size() >= 4 && inPath.substr(inPath.size() - 4) == ".enc") {
+                hasValidExtension = true;
+            } else if (inPath.size() >= 4 && inPath.substr(inPath.size() - 4) == ".aes") {
+                hasValidExtension = true;
+            }
+            
+            if (!hasValidExtension) {
+                continue; // Skip files without .enc or .aes extension
+            }
+        }
+        
         std::string outPath;
         unsigned char salt[SALT_LEN];
         unsigned char key[AES_KEY_LEN];
@@ -421,6 +435,14 @@ void processBatch(std::string startPath, std::string passcode, bool encrypt, boo
                  } else {
                      continue; 
                  }
+            }
+            
+            // Check if decrypted file already exists, add prefix if it does
+            if (fs::exists(outPath)) {
+                fs::path outP(outPath);
+                std::string outParentDir = outP.parent_path().string();
+                std::string outFileName = outP.filename().string();
+                outPath = outParentDir + "/(decrypted) " + outFileName;
             }
         }
 
@@ -475,9 +497,24 @@ void processBatch(std::string startPath, std::string passcode, bool encrypt, boo
 
             if (encrypt) {
                 QString qEnc = encryptName(QString::fromStdString(dirName), folderKey);
-                newPath = parentDir + "/" + qEnc.toStdString();
+                newPath = parentDir + "/" + qEnc.toStdString() + ".aes";
             } else {
-                QString qDec = decryptName(QString::fromStdString(dirName), folderKey);
+                // Check if folder has .aes or .enc extension
+                std::string suffix = ".aes";
+                std::string altSuffix = ".enc";
+                std::string nameToDecrypt = dirName;
+                
+                if (dirName.size() > suffix.size() && 
+                    dirName.compare(dirName.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                    nameToDecrypt = dirName.substr(0, dirName.size() - suffix.size());
+                } else if (dirName.size() > altSuffix.size() && 
+                           dirName.compare(dirName.size() - altSuffix.size(), altSuffix.size(), altSuffix) == 0) {
+                    nameToDecrypt = dirName.substr(0, dirName.size() - altSuffix.size());
+                } else {
+                    continue; // Skip folders without .enc or .aes extension
+                }
+                
+                QString qDec = decryptName(QString::fromStdString(nameToDecrypt), folderKey);
                 if (!qDec.isEmpty()) {
                      newPath = parentDir + "/" + qDec.toStdString();
                 } else {
@@ -509,6 +546,14 @@ void processBatch(std::string startPath, std::string passcode, bool encrypt, boo
 
 int main(int argc, char *argv[]) {
     QApplication app(argc, argv);
+
+    QIcon appIcon("icon.png"); 
+    if (!appIcon.isNull()) {
+        app.setWindowIcon(appIcon);
+    }
+
+
+
     QApplication::setStyle(QStyleFactory::create("Fusion"));
     EncryptorWindow window;
     window.show();
